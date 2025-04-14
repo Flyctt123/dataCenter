@@ -228,8 +228,8 @@ const FCDA_Node* find_fcda_by_topic_addr(const char* topic, int addr) {
             // 找到匹配的主题，遍历其 FCDA 列表
             for (int j = 0; j < g_topicMapping.mapList[i].fcdaCount; j++) {
                 if (g_topicMapping.mapList[i].fcdaList[j].addr == addr) {
-                    LOG_DEBUG("找到FCDA - topic: %s, addr: %d, desc: %s", 
-                             topic, addr, g_topicMapping.mapList[i].fcdaList[j].desc);
+                    //LOG_DEBUG("找到FCDA - topic: %s, addr: %d, desc: %s", 
+                    //         topic, addr, g_topicMapping.mapList[i].fcdaList[j].desc);
                     return &g_topicMapping.mapList[i].fcdaList[j];
                 }
             }
@@ -330,8 +330,8 @@ int store_mqtt_data(const char* topic, int addr, const char* desc,
     }
     
     sqlite3_finalize(stmt);
-    LOG_DEBUG("数据已存储 - topic: %s, addr: %d, val: %.2f, time: %s", 
-             topic, addr, val, date);
+    //LOG_DEBUG("数据已存储 - topic: %s, addr: %d, val: %.2f, time: %s", 
+    //         topic, addr, val, date);
     return 0;
 }
 
@@ -344,6 +344,7 @@ void close_database() {
     }
 }
 
+// 查询并上传历史数据记录
 int query_and_upload_history(const char* topic, const char* start_time, 
                            const char* end_time) {
     if (!db) {

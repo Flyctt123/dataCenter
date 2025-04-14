@@ -1,3 +1,5 @@
+#define _XOPEN_SOURCE
+#define _GNU_SOURCE
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -12,9 +14,11 @@
 #include "mqtt_client.h"
 
 // 静态函数声明
-static char* read_log_file(const char* filename, size_t* size);
+static char* read_log_file(const char* filename, size_t* size, 
+                          const char* start_str, const char* end_str);
 static void send_log_content(const char* topic, const char* content, size_t size);
-static void upload_log_file(const char* topic, const char* filename);
+static void upload_log_file(const char* topic, const char* filename, 
+                          const char* start_time, const char* end_time);
 static void process_data(int topic_index, int addr_value, double val_value, const char* topic);
 
 #define MQTT_HOST "localhost"
@@ -80,16 +84,15 @@ void store_periodic_data() {
             LOG_WARN("主题 [%d] 为空", i);
             continue;
         }
-        
-        LOG_INFO("处理主题[%d]: %s", i, topic_data->topic);
-        
+
         // 检查数据项数量是否有效
         if (topic_data->data_count <= 0 || topic_data->data_count > MAX_DATA_ITEMS) {
-            LOG_WARN("主题 [%s] 的数据项数量无效: %d", topic_data->topic, topic_data->data_count);
+            //LOG_WARN("主题 [%s] 的数据项数量无效: %d", topic_data->topic, topic_data->data_count);
             continue;
         }
         
-        LOG_INFO("数据项数量: %d", topic_data->data_count);
+        //LOG_INFO("处理主题[%d]: %s", i, topic_data->topic);
+        //LOG_INFO("数据项数量: %d", topic_data->data_count);
         
         for (int j = 0; j < topic_data->data_count; j++) {
             // 获取 FCDA 节点信息
@@ -100,10 +103,10 @@ void store_periodic_data() {
                         topic_data->topic, topic_data->data[j].addr);
             }
             
-            LOG_INFO("  存储数据[%d]: addr=%d, val=%f, desc=%s, unit=%s",
-                   j, topic_data->data[j].addr, topic_data->data[j].val,
-                   fcda ? fcda->desc : "(无描述)",
-                   fcda ? fcda->unit : "(无单位)");
+            //LOG_INFO("  存储数据[%d]: addr=%d, val=%f, desc=%s, unit=%s",
+            //       j, topic_data->data[j].addr, topic_data->data[j].val,
+            //       fcda ? fcda->desc : "(无描述)",
+            //       fcda ? fcda->unit : "(无单位)");
             
             store_mqtt_data(topic_data->topic, 
                          topic_data->data[j].addr,
@@ -115,7 +118,7 @@ void store_periodic_data() {
         }
     }
     
-    LOG_INFO("完成数据存储 - 时间: %s", date_str);
+    //LOG_INFO("完成数据存储 - 时间: %s", date_str);
 }
 
 // 初始化默认主题
@@ -196,7 +199,7 @@ int find_data_by_addr(TopicData *storage, int addr) {
     return -1;  // 没找到返回-1
 }
 
-// 修改 process_json_message 函数，添加数据存储逻辑
+// MQTT数据处理和存储
 void process_json_message(const char* json_string, const char* topic) {
     cJSON *root = cJSON_Parse(json_string);
     if (root == NULL) {
@@ -233,7 +236,52 @@ void process_json_message(const char* json_string, const char* topic) {
         cJSON_Delete(root);
         return;
     }
-          
+
+    if (strstr(topic, "/YK") != NULL) { //遥控数据
+        // 解析遥控数据特有字段
+        cJSON *cot = cJSON_GetObjectItem(root, "cot");
+        cJSON *rii = cJSON_GetObjectItem(root, "rii");
+        cJSON *cmd = cJSON_GetObjectItem(root, "cmd");
+        cJSON *addr = cJSON_GetObjectItem(root, "addr");
+        cJSON *para = cJSON_GetObjectItem(root, "para");
+        
+        if (cot && rii && cmd && addr) {
+            char event_desc[256];
+            snprintf(event_desc, sizeof(event_desc), 
+                    "遥控命令 - cot: %d, rii: %u, cmd: %d, addr: %d",
+                    cot->valueint, 
+                    (unsigned int)rii->valueint,  // 使用 valueint 并转换为无符号整数
+                    cmd->valueint,
+                    addr->valueint);
+            
+            // 记录遥控事件
+            store_event(event_desc);
+            LOG_INFO("%s", event_desc);
+            
+            // 如果有参数数组，记录参数
+            if (para && cJSON_IsArray(para)) {
+                int para_count = cJSON_GetArraySize(para);
+                if (para_count > 0) {
+                    char para_desc[256] = "遥控参数:";
+                    for (int i = 0; i < para_count; i++) {
+                        cJSON *para_item = cJSON_GetArrayItem(para, i);
+                        if (para_item) {
+                            char temp[32];
+                            snprintf(temp, sizeof(temp), " %d", para_item->valueint);
+                            strcat(para_desc, temp);
+                        }
+                    }
+                    store_event(para_desc);
+                    LOG_INFO("%s", para_desc);
+                }
+            }
+        } else {
+            LOG_ERROR("遥控数据格式错误 - 缺少必要字段");
+        }
+        cJSON_Delete(root);  // 添加这行确保释放内存
+        return;
+    }
+
     cJSON *timestamp = cJSON_GetObjectItem(root, "timestamp");
     if (timestamp && timestamp->valuestring) {
         strncpy(topic_storage[topic_index].timestamp, timestamp->valuestring, 
@@ -264,52 +312,58 @@ void process_json_message(const char* json_string, const char* topic) {
                                 // 日志查询和上传
                                 LOG_INFO("收到日志查询请求");
                                 store_event("收到日志查询请求");
-                                upload_log_file("dataCenter/JSON/LD1/YX", "logs/dataCenter.log");
-                                if (access("logs/dataCenter.log.1", F_OK) == 0) {
-                                    upload_log_file("dataCenter/JSON/LD1/YX", "logs/dataCenter.log.1");
-                                }
-                                if (access("logs/dataCenter.log.2", F_OK) == 0) {
-                                    upload_log_file("dataCenter/JSON/LD1/YX", "logs/dataCenter.log.2");
+                                
+                                // 获取开始时间和结束时间
+                                cJSON *start_time_log = cJSON_GetObjectItem(item, "start_time");
+                                cJSON *stop_time_log = cJSON_GetObjectItem(item, "stop_time");
+                                
+                                if (start_time_log && stop_time_log && 
+                                    start_time_log->valuestring && stop_time_log->valuestring) {
+                                    LOG_INFO("查询日志记录 - 开始时间: %s, 结束时间: %s",
+                                            start_time_log->valuestring, stop_time_log->valuestring);
+
+                                    // 上传当前日志文件
+                                    upload_log_file("dataCenter/JSON/LD1/YX", "logs/dataCenter.log", 
+                                                  start_time_log->valuestring, stop_time_log->valuestring);
+                                    
+                                    // 检查并上传历史日志文件
+                                    if (access("logs/dataCenter.log.1", F_OK) == 0)
+                                    {
+                                        upload_log_file("dataCenter/JSON/LD1/YX", "logs/dataCenter.log.1", 
+                                                      start_time_log->valuestring, stop_time_log->valuestring);
+                                    }
+                                    if (access("logs/dataCenter.log.2", F_OK) == 0)
+                                    {
+                                        upload_log_file("dataCenter/JSON/LD1/YX", "logs/dataCenter.log.2", 
+                                                      start_time_log->valuestring, stop_time_log->valuestring);
+                                    }
+                                } else {
+                                    LOG_ERROR("日志查询参数无效 - 缺少开始时间或结束时间");
                                 }
                                 break;
                             case 2:
                                 // 历史数据查询和上传
                                 LOG_INFO("收到历史数据查询请求");
                                 store_event("收到历史数据查询请求");
-                                // 获取查询参数
-                                if (val && val->type == cJSON_Number) {
-                                    int hours = (int)val->valuedouble;  // 查询小时数
-                                    
-                                    cJSON *topicItem = cJSON_GetObjectItem(item, "topic");
-                                    if (!topicItem || !cJSON_IsString(topicItem)) {
-                                        LOG_ERROR("历史数据查询缺少有效的 topic 字段");
-                                        break;
-                                    }
-                                    const char *topic = topicItem->valuestring;
 
-                                    // 获取当前时间
-                                    time_t now = time(NULL);
-                                    time_t start_time = now - (hours * 3600);  // 计算开始时间
-                                    
-                                    // 格式化时间字符串
-                                    char start_str[32], end_str[32];
-                                    struct tm tm_start = {0};
-                                    struct tm tm_end = {0};
-                                    
-                                    // 使用 localtime_r 来避免使用共享的静态缓冲区
-                                    localtime_r(&start_time, &tm_start);
-                                    localtime_r(&now, &tm_end);
-                                    
-                                    strftime(start_str, sizeof(start_str), 
-                                            "%Y-%m-%d %H:%M:00", &tm_start);
-                                    strftime(end_str, sizeof(end_str), 
-                                            "%Y-%m-%d %H:%M:00", &tm_end);
-                                    
+                                cJSON *topicItem = cJSON_GetObjectItem(item, "topic");
+                                if (!topicItem || !cJSON_IsString(topicItem)) {
+                                    LOG_ERROR("历史数据查询缺少有效的 topic 字段");
+                                    break;
+                                }
+                                const char *topic_histry = topicItem->valuestring;
+
+                                // 获取开始时间和结束时间
+                                cJSON *start_time_history = cJSON_GetObjectItem(item, "start_time");
+                                cJSON *stop_time_history = cJSON_GetObjectItem(item, "stop_time");
+                                
+                                if (start_time_history && stop_time_history && 
+                                    start_time_history->valuestring && stop_time_history->valuestring) {
                                     LOG_INFO("查询历史数据 - 开始时间: %s, 结束时间: %s",
-                                            start_str, end_str);
+                                            start_time_history->valuestring, stop_time_history->valuestring);
                                     
                                     // 查询并上传数据
-                                    query_and_upload_history(topic, start_str, end_str);
+                                    query_and_upload_history(topic_histry, start_time_history->valuestring, stop_time_history->valuestring);
                                 } else {
                                     LOG_ERROR("历史数据查询参数无效");
                                 }
@@ -319,32 +373,17 @@ void process_json_message(const char* json_string, const char* topic) {
                                 LOG_INFO("收到事件查询请求");
                                 store_event("收到事件查询请求");
  
-                                // 获取查询参数
-                                if (val && val->type == cJSON_Number) {
-                                    int hours = (int)val->valuedouble;  // 查询小时数
-                                    
-                                    // 获取当前时间
-                                    time_t now = time(NULL);
-                                    time_t start_time = now - (hours * 3600);  // 计算开始时间
-                                    
-                                    // 格式化时间字符串
-                                    char start_str[32], end_str[32];
-                                    struct tm tm_start = {0};
-                                    struct tm tm_end = {0};
-                                    
-                                    localtime_r(&start_time, &tm_start);
-                                    localtime_r(&now, &tm_end);
-                                    
-                                    strftime(start_str, sizeof(start_str), 
-                                            "%Y-%m-%d %H:%M:00", &tm_start);
-                                    strftime(end_str, sizeof(end_str), 
-                                            "%Y-%m-%d %H:%M:00", &tm_end);
-                                    
+                                // 获取开始时间和结束时间
+                                cJSON *start_time_event = cJSON_GetObjectItem(item, "start_time");
+                                cJSON *stop_time_event = cJSON_GetObjectItem(item, "stop_time");
+                                
+                                if (start_time_event && stop_time_event && 
+                                    start_time_event->valuestring && stop_time_event->valuestring) {
                                     LOG_INFO("查询事件记录 - 开始时间: %s, 结束时间: %s",
-                                            start_str, end_str);
+                                            start_time_event->valuestring, stop_time_event->valuestring);
                                     
                                     // 调用事件查询函数
-                                    query_and_upload_events(topic, start_str, end_str);
+                                    query_and_upload_events(topic, start_time_event->valuestring, stop_time_event->valuestring);
                                 }
                                 break;
                             default:
@@ -360,9 +399,9 @@ void process_json_message(const char* json_string, const char* topic) {
     }
 
     // 打印存储的数据摘要（按addr排序）
-    LOG_INFO("主题 [%s] 数据摘要:", topic);
-    LOG_INFO("时间戳: %s", topic_storage[topic_index].timestamp);
-    LOG_INFO("数据项数量: %d", topic_storage[topic_index].data_count);
+    //LOG_INFO("主题 [%s] 数据摘要:", topic);
+    //LOG_INFO("时间戳: %s", topic_storage[topic_index].timestamp);
+    //LOG_INFO("数据项数量: %d", topic_storage[topic_index].data_count);
     
     // 创建临时数组用于排序
     MqttData sorted_data[MAX_DATA_ITEMS];
@@ -381,10 +420,10 @@ void process_json_message(const char* json_string, const char* topic) {
     }
     
     // 打印排序后的数据
-    for (int i = 0; i < topic_storage[topic_index].data_count; i++) {
-        LOG_INFO("数据项 %d - addr: %d, val: %f", 
-               i, sorted_data[i].addr, sorted_data[i].val);
-    }
+    // for (int i = 0; i < topic_storage[topic_index].data_count; i++) {
+    //     LOG_INFO("数据项 %d - addr: %d, val: %f", 
+    //            i, sorted_data[i].addr, sorted_data[i].val);
+    // }
 
     cJSON_Delete(root);
 }
@@ -418,13 +457,13 @@ void subscribe_callback(void) {
     snprintf(command, sizeof(command),
              "mosquitto_sub -v -h %s -p %s", MQTT_HOST, MQTT_PORT);  // 添加 -v 参数
     
-    LOG_INFO("订阅主题=");
+    //LOG_INFO("订阅主题=");
     // 添加所有主题到订阅命令
     for (int i = 0; i < topic_count; i++) {
         char topic_arg[150];
         snprintf(topic_arg, sizeof(topic_arg), " -t %s", mqtt_topic[i]);
         strcat(command, topic_arg);
-        LOG_INFO("%s", mqtt_topic[i]);
+        //LOG_INFO("%s", mqtt_topic[i]);
     }
 
     FILE *pipe = popen(command, "r");
@@ -622,15 +661,15 @@ static void process_data(int topic_index, int addr_value, double val_value, cons
     if (existing_index >= 0) {
         // 更新已存在的数据
         topic_storage[topic_index].data[existing_index].val = val_value;
-        LOG_DEBUG("更新数据 - topic: %s, addr: %d, val: %f", 
-                 topic, addr_value, val_value);
+        //LOG_DEBUG("更新数据 - topic: %s, addr: %d, val: %f", 
+        //         topic, addr_value, val_value);
     } else if (topic_storage[topic_index].data_count < MAX_DATA_ITEMS) {
         // 添加新数据
         topic_storage[topic_index].data[topic_storage[topic_index].data_count].addr = addr_value;
         topic_storage[topic_index].data[topic_storage[topic_index].data_count].val = val_value;
         topic_storage[topic_index].data_count++;
-        LOG_DEBUG("添加新数据 - topic: %s, addr: %d, val: %f", 
-                 topic, addr_value, val_value);
+        //LOG_DEBUG("添加新数据 - topic: %s, addr: %d, val: %f", 
+        //         topic, addr_value, val_value);
     } else {
         LOG_WARN("数据项已达到最大限制 %d - topic: %s", 
                  MAX_DATA_ITEMS, topic);
@@ -638,33 +677,80 @@ static void process_data(int topic_index, int addr_value, double val_value, cons
 }
 
 // 读取日志文件内容
-static char* read_log_file(const char* filename, size_t* size) {
+static char* read_log_file(const char* filename, size_t* size, 
+                          const char* start_str, const char* end_str) {
     FILE* file = fopen(filename, "r");
     if (!file) {
         LOG_ERROR("无法打开日志文件: %s", filename);
         return NULL;
     }
 
-    // 获取文件大小
-    fseek(file, 0, SEEK_END);
-    *size = ftell(file);
-    fseek(file, 0, SEEK_SET);
-
-    // 分配内存
-    char* content = (char*)malloc(*size + 1);
-    if (!content) {
+    // 分配初始缓冲区
+    size_t buffer_size = 4096;  // 初始缓冲区大小
+    char* buffer = (char*)malloc(buffer_size);
+    if (!buffer) {
         LOG_ERROR("内存分配失败");
         fclose(file);
         return NULL;
     }
 
-    // 读取文件内容
-    size_t read_size = fread(content, 1, *size, file);
-    content[read_size] = '\0';
-    *size = read_size;
+    size_t total_size = 0;
+    char line[1024];
+    time_t start_time, end_time, log_time;
+
+    // 转换时间字符串为时间戳
+    struct tm tm_start = {0}, tm_end = {0};
+    strptime(start_str, "%Y-%m-%d %H:%M:%S", &tm_start);
+    strptime(end_str, "%Y-%m-%d %H:%M:%S", &tm_end);
+    start_time = mktime(&tm_start);
+    end_time = mktime(&tm_end);
+
+    while (fgets(line, sizeof(line), file)) {
+        // 解析日志行中的时间戳
+        char time_str[32];
+        if (sscanf(line, "[%[^]]", time_str) == 1) {
+            struct tm tm_log = {0};
+            strptime(time_str, "%Y-%m-%d %H:%M:%S", &tm_log);
+            log_time = mktime(&tm_log);
+
+            // 检查时间是否在范围内
+            if (log_time >= start_time && log_time <= end_time) {
+                size_t line_len = strlen(line);
+                
+                // 检查是否需要扩展缓冲区
+                if (total_size + line_len + 1 > buffer_size) {
+                    buffer_size *= 2;
+                    char* new_buffer = (char*)realloc(buffer, buffer_size);
+                    if (!new_buffer) {
+                        LOG_ERROR("重新分配内存失败");
+                        free(buffer);
+                        fclose(file);
+                        return NULL;
+                    }
+                    buffer = new_buffer;
+                }
+
+                // 添加行到缓冲区
+                memcpy(buffer + total_size, line, line_len);
+                total_size += line_len;
+            }
+        }
+    }
+
+    if (total_size == 0) {
+        // 没有找到符合时间范围的日志
+        free(buffer);
+        fclose(file);
+        *size = 0;
+        return NULL;
+    }
+
+    // 添加字符串结束符
+    buffer[total_size] = '\0';
+    *size = total_size;
 
     fclose(file);
-    return content;
+    return buffer;
 }
 
 // 发送日志文件内容
@@ -674,7 +760,7 @@ static void send_log_content(const char* topic, const char* content, size_t size
     int total_segments = (size + MAX_SEGMENT_SIZE - 1) / MAX_SEGMENT_SIZE;
     
     // 将日志内容分段发送
-    LOG_INFO("预计分段数: %d", total_segments);
+    //LOG_INFO("预计分段数: %d", total_segments);
 
     size_t offset = 0;
     int segment_index = 0;
@@ -701,8 +787,8 @@ static void send_log_content(const char* topic, const char* content, size_t size
             segment_size = MAX_SEGMENT_SIZE;
         }
 
-        LOG_INFO("处理分段 %d/%d - 大小: %zu bytes", 
-                 segment_index + 1, total_segments, segment_size);
+        //LOG_INFO("处理分段 %d/%d - 大小: %zu bytes", 
+        //         segment_index + 1, total_segments, segment_size);
 
         cJSON *item = cJSON_CreateObject();
         char* segment = (char*)malloc(segment_size + 1);
@@ -736,8 +822,8 @@ static void send_log_content(const char* topic, const char* content, size_t size
             return;
         }
 
-        LOG_DEBUG("发送分段 %d - JSON大小: %zu bytes", 
-                  segment_index, strlen(json_str));
+        //LOG_DEBUG("发送分段 %d - JSON大小: %zu bytes", 
+        //          segment_index, strlen(json_str));
         publish_message(json_str, topic);
 
         // 添加延时，避免消息发送太快
@@ -753,13 +839,17 @@ static void send_log_content(const char* topic, const char* content, size_t size
 }
 
 // 上传日志文件
-static void upload_log_file(const char* topic, const char* filename) {
+static void upload_log_file(const char* topic, const char* filename, 
+                          const char* start_time, const char* end_time) {
     size_t size;
-    char* content = read_log_file(filename, &size);
+    char* content = read_log_file(filename, &size, start_time, end_time);
     if (content) {
-        LOG_INFO("开始上传日志文件: %s (大小: %zu bytes)", filename, size);
+        LOG_INFO("开始上传日志文件: %s (大小: %zu bytes, 时间范围: %s 到 %s)", 
+                 filename, size, start_time, end_time);
         send_log_content(topic, content, size);
         free(content);
         LOG_INFO("日志文件上传完成: %s", filename);
+    } else {
+        LOG_INFO("在指定时间范围内未找到日志记录: %s", filename);
     }
 } 

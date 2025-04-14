@@ -166,9 +166,11 @@ void log_write(LogLevel level, const char* file, int line, const char* fmt, ...)
     filename = filename ? filename + 1 : file;
     
     // 写入日志头
-    fprintf(log_file, "[%s] [%s] [%s:%d] ", 
-            time_str, level_strings[level], filename, line);
+    //fprintf(log_file, "[%s] [%s] [%s:%d] ", 
+    //        time_str, level_strings[level], filename, line);
     
+    fprintf(log_file, "[%s] ", time_str);
+
     // 写入日志内容
     va_list args;
     va_start(args, fmt);
